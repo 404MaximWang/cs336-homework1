@@ -242,6 +242,7 @@ class Tokenizer:
             self._pre_tokenize_base(text)
         current_size = len(self.vocab)
         while (current_size < vocab_size):
+            print("Processing:" + str(current_size))
             self.t.counting_freq()
             if self.t.freq.size() == 0:
                 break
