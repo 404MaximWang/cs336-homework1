@@ -7,6 +7,7 @@ import cppyy
 from typing import Iterable
 import multiprocessing
 import collections
+import psutil
 
 if not hasattr(cppyy.gbl, 'Train'):
     cppyy.cppdef('''
