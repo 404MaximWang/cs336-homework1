@@ -3,10 +3,13 @@ from cs336_basics.utils import cross_entropy, get_batch
 from cs336_basics.model import transformer_lm
 from cs336_basics.optimizer import AdamW
 from cs336_basics.bpe_tokenizer_optimized_3 import Tokenizer
+from cs336_basics.pretokenization import find_chunk_boundaries
 import torch
 import numpy as np
 import os
 import argparse
+import multiprocessing
+import itertools
 from torch import Tensor
 from jaxtyping import Float, Int
 
@@ -64,6 +67,15 @@ def init_weights(config: dict) -> dict[str, Tensor]:
 def generate_shit(batch_size: int, context_length: int, vocab_size: int) -> Int[Tensor, "batch_size context_length"]:
     return torch.randint(0, vocab_size, (batch_size, context_length)).cuda()
 
+def _encode_worker(file_path, start, end, tokenizer_path):
+    from cs336_basics.bpe_tokenizer_optimized_3 import Tokenizer
+    tokenizer = Tokenizer.load(tokenizer_path)
+    with open(file_path, 'rb') as f:
+        f.seek(start)
+        chunk_data = f.read(end - start)
+    text = chunk_data.decode('utf-8', errors='replace')
+    return tokenizer.encode(text)
+
 def load_checkpoint(path: str) -> tuple[dict[str, Tensor], dict]:
     print(f"Loading checkpoint from {path}...")
     checkpoint = torch.load(path, map_location="cpu")
@@ -76,9 +88,7 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str, save_path: 
     tokenizer = Tokenizer.load(tokenizer_path)
     
     print(f"Encoding corpus from {corpus_path} (this might take a while)...")
-    with open(corpus_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    ids = tokenizer.encode(text)
+    ids = parallel_encode(tokenizer, corpus_path, tokenizer_path)
     dataset = np.array(ids, dtype=np.int32)
     print(f"Dataset ready! Total tokens: {len(dataset)}")
 
@@ -111,6 +121,20 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str, save_path: 
     torch.save({'weights': weights, 'config': config}, save_path)
     print("All saved! Mission Accomplished.")
 
+def parallel_encode(tokenizer, file_path, tokenizer_path):
+    num_cpu = multiprocessing.cpu_count()
+    # 获取边界
+    split_bytes: bytes = tokenizer.special_tokens[0].encode('utf-8')
+    boundaries: list[int] = find_chunk_boundaries(file_path, split_bytes)
+    # 构建任务，只传路径
+    tasks = [(file_path, start, end, tokenizer_path) 
+                for start, end in zip(boundaries[:-1], boundaries[1:])]
+    print(f"Parallel Encoding... dispatching to {num_cpu} cores.")
+    with multiprocessing.Pool(processes = num_cpu) as pool:
+        # 使用 starmap 把 tasks 里的元组分拆传给 _encode_worker
+        results = pool.starmap(_encode_worker, tasks)
+    return list(itertools.chain.from_iterable(results))
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=1000)
@@ -125,9 +149,3 @@ if __name__ == "__main__":
               tokenizer_path=args.tokenizer,
               save_path=args.output,
               checkpoint_path=args.checkpoint)
-
-
-
-    
-
-    
