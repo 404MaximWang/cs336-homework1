@@ -9,7 +9,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from cs336_basics.bpe_tokenizer_optimized_2 import Tokenizer
+from cs336_basics.bpe_tokenizer_optimized_3 import Tokenizer
 from cs336_basics.optimizer import AdamW, get_lr_cosine_schedule, gradient_clipping, load_checkpoint, save_checkpoint
 from cs336_basics.utils import softmax, cross_entropy, embedding, silu, linear, rmsnorm, scaled_dot_product_attention, swiglu, rope, get_batch
 from cs336_basics.model import multihead_self_attention, multihead_self_attention_with_rope, transformer_block, transformer_lm

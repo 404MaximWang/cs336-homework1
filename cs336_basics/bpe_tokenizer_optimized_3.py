@@ -1,170 +1,13 @@
-# 优化点：新增了multiprocessing处理预分词；修复了C++部分内存占用过大的问题
+# 优化点：新增了multiprocessing处理预分词；扔掉了cppyy
+# 已被JIT气晕
 from __future__ import annotations
 from .pretokenization import find_chunk_boundaries
 import regex as re
 import json
-import cppyy
 from typing import Iterable
 import multiprocessing
 import collections
 import psutil
-
-if not hasattr(cppyy.gbl, 'Train'):
-    cppyy.cppdef('''
-#include <vector>
-#include <unordered_map>
-#include <utility>
-#include <thread>
-#include <mutex>
-#include <algorithm>
-#include <atomic>
-
-class Train{
-public:
-    Train(){
-    }
-
-    std::unordered_map<uint64_t, uint64_t> freq; //词组及其频率
-    std::vector<std::vector<uint32_t>> word_bytes; // 单词
-    std::vector<std::string> vocab_cpp; // 这里我们用std:string存放Python中的bytes
-    std::vector<uint64_t> word_freqs; // 单词词频
-                 
-    void sync_vocab_entry(uint32_t id, const std::string& bytes) {
-        if (id >= vocab_cpp.size()) {
-            vocab_cpp.resize(id + 1);
-        }
-        vocab_cpp[id] = bytes;
-    }
-
-    void merge_pair(std::pair<uint32_t, uint32_t> pair, uint32_t new_id){
-        // 获取核心数
-        uint16_t num_threads = std::thread::hardware_concurrency();
-        if (num_threads == 0) num_threads = 4;
-        // Atomic计数器
-        std::atomic<uint64_t> index(0);
-        uint64_t total_words = word_bytes.size();
-
-        std::vector<std::thread> threads;
-        for (uint16_t i = 0; i < num_threads; i++) {
-            // 创建并启动一个新线程
-            // std::ref() 是为了引用传递
-            threads.emplace_back(&Train::merge_worker, this, total_words, std::ref(index), pair, new_id);
-        }
-        // 主线程等待子线程结束
-        for (auto& t : threads) {
-            if (t.joinable()) t.join();
-        }
-    }
-
-    void counting_freq(){
-        freq.clear();
-        // 获取核心数
-        uint16_t num_threads = std::thread::hardware_concurrency();
-        if (num_threads == 0) num_threads = 4;
-        // Atomic计数器
-        std::atomic<uint64_t> index(0);
-        uint64_t total_words = word_bytes.size();
-
-        std::vector<std::thread> threads;
-        std::vector<std::unordered_map<uint64_t, uint64_t>> thread_freqs(num_threads);
-        for (uint16_t i = 0; i < num_threads; i++) {
-            // 创建并启动一个新线程
-            // std::ref() 是为了引用传递
-            threads.emplace_back(&Train::freq_worker, this, total_words, std::ref(index), std::ref(thread_freqs[i]));
-        }
-        // 主线程等待子线程结束
-        for (auto& t : threads) {
-            if (t.joinable()) t.join();
-        }
-        // 合并所有线程的计数结果
-        for (auto& thread_freq : thread_freqs) {
-            for (auto& [pair, count] : thread_freq) {
-                freq[pair] += count;
-            }
-        }
-    }
-
-    void clear_word_bytes(){
-        word_bytes.clear();
-    }
-
-    // 牛马函数
-    void freq_worker(uint64_t total_words, std::atomic<uint64_t>& index, std::unordered_map<uint64_t, uint64_t>& thread_freq){
-        uint16_t batch_size = 256;
-        while (true) {
-            uint64_t start = index.fetch_add(batch_size);
-            if (start >= total_words) break;
-            uint64_t end = std::min(start + batch_size, total_words);
-            for (uint64_t i = start; i < end; i++) {
-                if (word_bytes[i].size() < 2) continue;
-                for (uint64_t j = 0; j < word_bytes[i].size() - 1; j++) {
-                    thread_freq[static_cast<uint64_t>(word_bytes[i][j]) << 32 | word_bytes[i][j+1]] += word_freqs[i]; //C++中，我们不需要检查pair是否在freq中，直接加就行
-                }
-            }
-        }
-    }
-
-    void merge_worker(uint64_t total_words, std::atomic<uint64_t>& index, std::pair<uint32_t, uint32_t> pair, uint32_t new_id){
-        uint16_t batch_size = 128;
-        while (true) {
-            uint64_t start = index.fetch_add(batch_size);
-            if (start >= total_words) break;
-            uint64_t end = std::min(start + batch_size, total_words);
-            for (uint64_t i = start; i < end; i++) {
-                // 这里我们使用极其先进的双指针法 一个读指针 一个写指针
-                std::vector<uint32_t>& ids = word_bytes[i];
-                if (ids.size() < 2) continue;
-                uint32_t read_ptr = 0;
-                uint32_t write_ptr = 0;
-                while (read_ptr < ids.size()) {
-                    if (read_ptr < ids.size() - 1 && ids[read_ptr] == pair.first && ids[read_ptr + 1] == pair.second){
-                        ids[write_ptr] = new_id;
-                        read_ptr += 2;
-                    } else {
-                        ids[write_ptr] = ids[read_ptr];
-                        read_ptr += 1;
-                    }
-                    write_ptr += 1; 
-                }
-                ids.resize(write_ptr); //把末尾没用的部分夹断
-            }
-        }
-    }
-    
-    uint64_t get_best_pair(){
-        uint64_t best_pair = 0;
-        uint64_t best_freq = 0;
-        std::string best_p1, best_p2;
-        for (auto& [pair, freq] : freq) {
-            if (freq > best_freq) {
-                best_freq = freq;
-                best_pair = pair;
-                best_p1 = vocab_cpp[pair >> 32];
-                best_p2 = vocab_cpp[pair & 0xffffffff];
-            } else if (freq == best_freq) {
-                const std::string& p1 = vocab_cpp[pair >> 32];
-                const std::string& p2 = vocab_cpp[pair & 0xffffffff];
-                if (p1 > best_p1 || (p1 == best_p1 && p2 > best_p2)) {
-                    best_pair = pair;
-                    best_p1 = p1;
-                    best_p2 = p2;
-                }
-            }
-        }
-        return best_pair;
-    }
-    void add_word(const std::string& bytes, uint64_t count){
-        std::vector<uint32_t> word;
-        word.reserve(bytes.size());
-        for (unsigned char c : bytes) word.push_back(static_cast<uint32_t>(c));
-        word_bytes.push_back(word);
-        word_freqs.push_back(count);
-    }          
-};
-
-''')
-
-Train = cppyy.gbl.Train
 
 # 牛马
 def _pre_tokenize_worker(file_path: str, start: int, end: int, pat_str: str, special_tokens: list[str]) -> collections.Counter[bytes]:
@@ -217,8 +60,6 @@ class Tokenizer:
             self.vocab[len(self.vocab)] = item.encode('utf-8')
         # 一坨屎啊这个字典生成器
         self.st_map: dict[str, int] = {token: next(i for i, v in self.vocab.items() if v == token.encode('utf-8')) for token in self.special_tokens}
-        # 神人C++
-        self.t = Train()
         # 洗正则表达式
         PAT_base = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         self.PAT_base: re.Pattern = re.compile(PAT_base)
@@ -227,11 +68,14 @@ class Tokenizer:
             self.PAT: re.Pattern = re.compile("|".join([f"{re.escape(token)}" for token in self.special_tokens]) + "|" + PAT_base)
         else:
             self.PAT = self.PAT_base
-        # 同步vocab到C++
-        for id, bval in self.vocab.items():
-            self.t.sync_vocab_entry(id, bval)
+
         
     def train(self, file_path: str, vocab_size: int, max_bytes: int = None):
+        if not self.special_tokens:
+            raise ValueError("Training requires at least one special token.")
+        word_freq: list[int] = []
+        word_bytes: list[bytes] = []
+        word_ids: list[list[int]] = []
         # 获取边界
         split_bytes: bytes = self.special_tokens[0].encode('utf-8')
         boundaries: list[int] = find_chunk_boundaries(file_path, split_bytes)
@@ -254,34 +98,86 @@ class Tokenizer:
             results: list[collections.Counter[bytes]] = pool.starmap(_pre_tokenize_worker, tasks)
             for c in results:
                 global_counts.update(c)
+        for b_word, freq in global_counts.items():
+            word_bytes.append(b_word)
+            word_freq.append(freq)
+            word_ids.append(list(b_word))
         print(f"Pre-tokenization finished. Unique words: {len(global_counts)}")
-        # 给C++
-        for word_bytes, count in global_counts.items():
-            self.t.add_word(word_bytes, count)
+        # 建立pair到word的表格
+        pair_freqs = collections.defaultdict(int)
+        pair_to_words = collections.defaultdict(set)
+        num_words = len(word_ids)
+        for i in range(num_words):
+            w_id = word_ids[i]
+            w_freq = word_freq[i]
+            len_word = len(w_id)
+            for j in range(len_word - 1):
+                pair = (w_id[j], w_id[j+1])
+                pair_freqs[pair] += w_freq
+                pair_to_words[pair].add(i)
 
         current_size = len(self.vocab)
         while (current_size < vocab_size):
-            print("Processing:" + str(current_size))
-            self.t.counting_freq()
-            if self.t.freq.size() == 0:
+            if not pair_freqs:
                 break
-            # C++ map 迭代返回的是键值元组，不是 Key，行为和Python不一致
-            # 下面的代码中p[1]是count, p[0]是uint64_t形式的pair
+            print("Processing:" + str(current_size))
+            # 找pair
             # 频率相同时，按 (first_token_bytes, second_token_bytes) 元组字典序降序选择
-            # 注意一下元组比较和拼接比较不一样
-            # best_item = max(self.t.freq, key=lambda p: (p[1], (self.vocab[p[0] >> 32], self.vocab[p[0] & 0xffffffff])))
-            # best_pair = (best_item[0] >> 32, best_item[0] & 0xffffffff) # 转成 Python tuple 方便后续使用
-            best_pair_uint64_t = self.t.get_best_pair()
-            best_pair = (best_pair_uint64_t >> 32, best_pair_uint64_t & 0xffffffff)
+            best_pair: tuple[int, int] = max(pair_freqs, key=lambda p: (pair_freqs[p], self.vocab[p[0]], self.vocab[p[1]]))
+            if pair_freqs[best_pair] == 0:
+                break
             self.merges[best_pair] = current_size
 
-            self.t.merge_pair(best_pair, current_size)
+            words_affected: set[int] = pair_to_words[best_pair]
+            for i in words_affected:
+                w_id = word_ids[i]
+                w_freq = word_freq[i]
+                len_word = len(w_id)
+                new_w_id: list[int] = []
+                j: int = 0
+                original_pairs: list[tuple[int, int]] = []
+                new_pairs: list[tuple[int, int]] = []
+                while j < len_word - 1:
+                    original_pairs.append((w_id[j], w_id[j+1]))
+                    j += 1
+                j = 0
+                while j < len_word:
+                    if j < len_word - 1 and (w_id[j], w_id[j+1]) == best_pair:
+                        new_w_id.append(current_size)
+                        if j > 0:
+                            pair_to_words[(w_id[j-1], current_size)].add(i)
+                            pair_freqs[(w_id[j-1], current_size)] += w_freq
+                            pair_freqs[(w_id[j-1], w_id[j])] -= w_freq
+
+                        if j < len_word - 2:
+                            pair_to_words[(current_size, w_id[j+2])].add(i)
+                            pair_freqs[(current_size, w_id[j+2])] += w_freq
+                            pair_freqs[(w_id[j+1], w_id[j+2])] -= w_freq
+                        j += 2
+                    else:
+                        new_w_id.append(w_id[j])
+                        j += 1
+                word_ids[i] = new_w_id
+                len_word = len(new_w_id)
+                j = 0
+                while j < len_word - 1:
+                    new_pairs.append((new_w_id[j], new_w_id[j+1]))
+                    j += 1
+                # 对pair_to_words的一些对进行删除i操作
+                new_pairs_set = set(new_pairs)
+                original_pairs_set = set(original_pairs)
+                original_pairs_set.discard(best_pair)
+                for pair in original_pairs_set:
+                    if pair not in new_pairs_set:
+                        pair_to_words[pair].discard(i) # 用discard防止删多次报错
+            # 删除
+            del pair_to_words[best_pair]
+            del pair_freqs[best_pair]
+
 
             # 记得更新vocab
             self.vocab[current_size] = self.vocab[best_pair[0]] + self.vocab[best_pair[1]] # 拼字节
             self.reversed_vocab[self.vocab[current_size]] = current_size
-            # 同步新 vocab entry 到 C++ 侧，供 get_best_pair 的 tie-breaking 使用
-            self.t.sync_vocab_entry(current_size, self.vocab[current_size])
             current_size += 1
 
     def encode(self, text: str) -> list[int]:
