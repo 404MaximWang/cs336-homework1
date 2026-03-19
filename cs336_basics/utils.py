@@ -103,7 +103,9 @@ def rope(
     # a.unsqueeze(-1)
     # [[10], [20], [30]]
     # torch.arrange的用法和Python range用法相似，都是左界（闭），右界（开），步长
-    angles: Float[Tensor, " ... sequence_length d_k / 2"] = token_positions.unsqueeze(-1) / theta ** (torch.arange(0, d_k, 2).float() / d_k)
+    device = token_positions.device
+    # 确保 arange 生成在同一设备上
+    angles = token_positions.unsqueeze(-1) / (theta ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
     # token_positions.unsqueeze(-1) 的形状是 (..., sequence_length, 1)
     # torch.arange(0, d_k, 2).float() / d_k 的形状是 (d_k / 2,)
     # 它们相除后，形状是 (..., sequence_length, d_k / 2) 这里token_positions.unsqueeze(-1)的最后一维被拓展

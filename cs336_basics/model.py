@@ -70,12 +70,13 @@ def multihead_self_attention_with_rope(
     v = v.transpose(-3, -2) # ... num_heads sequence_length head_dim_v
     # 转置以后 倒数第三维是num_heads 倒数第二维是sequence_length
     # 很好玩的啦 可以转的啦（rope）
+    device = q.device
     if token_positions is None:
-        token_positions = torch.arange(sequence_length)
+        token_positions = torch.arange(sequence_length, device=device)
     q = rope(head_dim, theta, q, token_positions)
     k = rope(head_dim, theta, k, token_positions)
     # 生成一个下三角矩阵
-    mask = torch.tril(torch.ones(sequence_length, sequence_length)) # sequence_length sequence_length
+    mask = torch.tril(torch.ones(sequence_length, sequence_length, device=device))
     # 神人scaled_dot_product_attention
     res: Float[Tensor, " ... num_heads sequence_length head_dim_v"] = scaled_dot_product_attention(q, k, v, mask)
     # 合并多个头 也就是把num_heads和head_dim_v合并，变成d_v

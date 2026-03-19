@@ -20,6 +20,14 @@ dependencies = [
     "ty>=0.0.1a16",
 ]
 
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cs336_basics*"]
+exclude = ["checkpoints*", "tests*", "scripts*"]
+
 [[tool.uv.index]]
 name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu130"
@@ -33,22 +41,5 @@ torchaudio = { index = "pytorch-cuda" }
 [tool.uv]
 package = true
 python-preference = "managed"
-prerelease = "allow" # 允许安装 2.10.0 这种抢跑版本
-
-[tool.pytest.ini_options]
-log_cli = true
-log_cli_level = "WARNING"
-addopts = "-s"
-
-[tool.ruff]
-line-length = 120
-
-[tool.ruff.lint.extend-per-file-ignores]
-# Also ignore `E402` in all `__init__.py` files.
-"__init__.py" = ["E402", "F401", "F403", "E501"]
-
-[tool.ruff.lint]
-extend-select = ["UP"]
-ignore = [
-    "F722"
-]
+prerelease = "allow"
+environments = ["sys_platform == 'linux' and platform_machine == 'aarch64'"]
