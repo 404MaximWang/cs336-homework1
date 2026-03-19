@@ -1,10 +1,12 @@
-# 版本 2：引入 C++ (cppyy) 后端
-# 特点：将高频的频率统计与合并操作移至 C++ 多线程实现，但预分词仍为 Python 单线程，且 C++ 容器内存占用较高。
+# 优化点：新增了multiprocessing处理预分词；修复了C++部分内存占用过大的问题
 from __future__ import annotations
+from pretokenization import find_chunk_boundaries
 import regex as re
 import json
 import cppyy
 from typing import Iterable
+import multiprocessing
+import collections
 
 if not hasattr(cppyy.gbl, 'Train'):
     cppyy.cppdef('''
@@ -21,27 +23,16 @@ public:
     Train(){
     }
 
-    std::unordered_map<uint64_t, uint32_t> freq;
-    std::vector<std::vector<uint32_t>> word_bytes;
+    std::unordered_map<uint64_t, uint64_t> freq; //词组及其频率
+    std::vector<std::vector<uint32_t>> word_bytes; // 单词
     std::vector<std::string> vocab_cpp; // 这里我们用std:string存放Python中的bytes
+    std::vector<uint64_t> word_freqs; // 单词词频
                  
     void sync_vocab_entry(uint32_t id, const std::string& bytes) {
         if (id >= vocab_cpp.size()) {
             vocab_cpp.resize(id + 1);
         }
         vocab_cpp[id] = bytes;
-    }
-
-    void ejalucation(const std::string& bytes) {
-        std::vector<uint32_t> ids;
-        // 预分配内存
-        ids.reserve(bytes.size());
-        for (uint32_t i = 0; i < bytes.size(); i++) {
-            // ids.push_back(bytes[i]);这是不正确的
-            // 注意一下，考虑到非ASCII字符，要把bytes[i]转换成unsigned char
-            ids.push_back(static_cast<unsigned char>(bytes[i]));
-        }
-        word_bytes.push_back(ids);
     }
 
     void merge_pair(std::pair<uint32_t, uint32_t> pair, uint32_t new_id){
@@ -74,7 +65,7 @@ public:
         uint64_t total_words = word_bytes.size();
 
         std::vector<std::thread> threads;
-        std::vector<std::unordered_map<uint64_t, uint32_t>> thread_freqs(num_threads);
+        std::vector<std::unordered_map<uint64_t, uint64_t>> thread_freqs(num_threads);
         for (uint16_t i = 0; i < num_threads; i++) {
             // 创建并启动一个新线程
             // std::ref() 是为了引用传递
@@ -96,39 +87,25 @@ public:
         word_bytes.clear();
     }
 
-    std::vector<int> get_linear_word_bytes(){ // 已作废 不再使用
-        std::vector<int> res;
-        // 听说预分配内存可以提高性能
-        uint32_t total_size = 0;
-        for (uint32_t i = 0; i < word_bytes.size(); i++) {
-            total_size += word_bytes[i].size();
-        }
-        res.reserve(total_size);
-        for (uint32_t i = 0; i < word_bytes.size(); i++) {
-            res.insert(res.end(), word_bytes[i].begin(), word_bytes[i].end());
-        }
-        return res;
-    }
-
     // 牛马函数
-    void freq_worker(uint64_t total_words, std::atomic<uint64_t>& index, std::unordered_map<uint64_t, uint32_t>& thread_freq){
-        uint16_t batch_size = 1024;
-        while (true){
+    void freq_worker(uint64_t total_words, std::atomic<uint64_t>& index, std::unordered_map<uint64_t, uint64_t>& thread_freq){
+        uint16_t batch_size = 256;
+        while (true) {
             uint64_t start = index.fetch_add(batch_size);
             if (start >= total_words) break;
             uint64_t end = std::min(start + batch_size, total_words);
             for (uint64_t i = start; i < end; i++) {
                 if (word_bytes[i].size() < 2) continue;
                 for (uint64_t j = 0; j < word_bytes[i].size() - 1; j++) {
-                    thread_freq[static_cast<uint64_t>(word_bytes[i][j]) << 32 | word_bytes[i][j+1]] += 1; //C++中，我们不需要检查pair是否在freq中，直接加就行
+                    thread_freq[static_cast<uint64_t>(word_bytes[i][j]) << 32 | word_bytes[i][j+1]] += word_freqs[i]; //C++中，我们不需要检查pair是否在freq中，直接加就行
                 }
             }
         }
     }
 
     void merge_worker(uint64_t total_words, std::atomic<uint64_t>& index, std::pair<uint32_t, uint32_t> pair, uint32_t new_id){
-        uint16_t batch_size = 1024;
-        while (true){
+        uint16_t batch_size = 128;
+        while (true) {
             uint64_t start = index.fetch_add(batch_size);
             if (start >= total_words) break;
             uint64_t end = std::min(start + batch_size, total_words);
@@ -155,7 +132,7 @@ public:
     
     uint64_t get_best_pair(){
         uint64_t best_pair = 0;
-        uint32_t best_freq = 0;
+        uint64_t best_freq = 0;
         std::string best_p1, best_p2;
         for (auto& [pair, freq] : freq) {
             if (freq > best_freq) {
@@ -175,12 +152,42 @@ public:
         }
         return best_pair;
     }
-                 
+    void add_word(const std::string& bytes, uint64_t count){
+        std::vector<uint32_t> word;
+        word.reserve(bytes.size());
+        for (unsigned char c : bytes) word.push_back(static_cast<uint32_t>(c));
+        word_bytes.push_back(word);
+        word_freqs.push_back(count);
+    }          
 };
 
 ''')
 
 Train = cppyy.gbl.Train
+
+# 牛马
+def _pre_tokenize_worker(file_path: str, start: int, end: int, pat_str: str, special_tokens: list[str]) -> collections.Counter[bytes]:
+    import regex # 子进程需要重新import（？）
+    counts: collections.Counter[bytes] = collections.Counter()
+    pat: regex.Pattern = regex.compile(pat_str)
+    with open(file_path, "rb") as f:
+        f.seek(start)
+        data: str = f.read(end - start).decode("utf-8", errors='replace')
+    
+    if special_tokens:
+        st_pattern: str = "|".join(regex.escape(st) for st in special_tokens)
+        chunks: list[str] = regex.split(st_pattern, data)
+    else:
+        chunks = [data]
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        for match in pat.finditer(chunk):
+            counts[match.group().encode('utf-8')] += 1
+    print("one worker done")
+    return counts
+
 
 class Tokenizer:
     def __init__(self, vocab: dict[int, bytes] = None, merges: dict[tuple[int, int], int] = None, special_tokens: list[str] = None):
@@ -213,10 +220,10 @@ class Tokenizer:
         self.t = Train()
         # 洗正则表达式
         PAT_base = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        self.PAT_base = re.compile(PAT_base)
+        self.PAT_base: re.Pattern = re.compile(PAT_base)
         if self.special_tokens:
             # encode 时用含 special token 的正则，确保 special token 被整体匹配
-            self.PAT = re.compile("|".join([f"{re.escape(token)}" for token in self.special_tokens]) + "|" + PAT_base)
+            self.PAT: re.Pattern = re.compile("|".join([f"{re.escape(token)}" for token in self.special_tokens]) + "|" + PAT_base)
         else:
             self.PAT = self.PAT_base
         # 同步vocab到C++
@@ -224,24 +231,33 @@ class Tokenizer:
             self.t.sync_vocab_entry(id, bval)
         
     def train(self, file_path: str, vocab_size: int, max_bytes: int = None):
-        # with open()保证离开缩进块后自动 close，非常RAII
-        with open(file_path, 'r', encoding='utf-8') as f:
-            if max_bytes is None:
-                text = f.read()
-            else:
-                text = f.read(max_bytes)
-        print(f"Read {len(text)} characters.")
+        # 获取边界
+        split_bytes: bytes = self.special_tokens[0].encode('utf-8')
+        boundaries: list[int] = find_chunk_boundaries(file_path, split_bytes)
+        
+        # 处理 max_bytes
+        if max_bytes:
+            boundaries = [b for b in boundaries if b <= max_bytes]
+            if not boundaries or boundaries[-1] < max_bytes:
+                boundaries.append(max_bytes)
 
-        # 训练时先按 special token 分割语料，去掉 special token 本身
-        # 然后对每个片段用基础正则做 pre-tokenization
-        if self.special_tokens:
-            st_pattern = "|".join(re.escape(st) for st in self.special_tokens)
-            chunks = re.split(st_pattern, text)
-            for chunk in chunks:
-                if chunk:
-                    self._pre_tokenize_base(chunk)
-        else:
-            self._pre_tokenize_base(text)
+        # (文件路径, 起点, 终点, 正则, 标记)
+        tasks = [(file_path, start, end, self.PAT_base.pattern, self.special_tokens) 
+                 for start, end in zip(boundaries[:-1], boundaries[1:])]
+        print(f"Starting pre-tokenization.")
+        global_counts: collections.Counter[bytes] = collections.Counter()
+        # 开进程池
+        cpu_core_num: int = psutil.cpu_count()
+        with multiprocessing.Pool(processes = cpu_core_num) as pool:
+            # starmap 会自动解包 tasks 里的元组并传给 _pre_tokenize_worker
+            results: list[collections.Counter[bytes]] = pool.starmap(_pre_tokenize_worker, tasks)
+            for c in results:
+                global_counts.update(c)
+        print(f"Pre-tokenization finished. Unique words: {len(global_counts)}")
+        # 给C++
+        for word_bytes, count in global_counts.items():
+            self.t.add_word(word_bytes, count)
+
         current_size = len(self.vocab)
         while (current_size < vocab_size):
             print("Processing:" + str(current_size))
@@ -266,11 +282,6 @@ class Tokenizer:
             # 同步新 vocab entry 到 C++ 侧，供 get_best_pair 的 tie-breaking 使用
             self.t.sync_vocab_entry(current_size, self.vocab[current_size])
             current_size += 1
-
-    def _pre_tokenize_base(self, text: str):
-        """训练时用基础正则（不含 special token）做 pre-tokenization"""
-        for match in re.finditer(self.PAT_base, text):
-            self.t.ejalucation(match.group().encode('utf-8'))
 
     def encode(self, text: str) -> list[int]:
         res: list[int] = []

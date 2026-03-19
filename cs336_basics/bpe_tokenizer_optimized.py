@@ -1,3 +1,5 @@
+# 版本 1：初步引入 C++ (cppyy)
+# 特点：将核心逻辑移至 C++，但此时的 C++ 实现仍为单线程，且使用了较慢的 std::map，未实现多并行。
 import regex as re
 import json
 import cppyy
@@ -54,7 +56,7 @@ public:
         for (uint32_t i = 0; i < word_bytes.size(); i++) {
             for (uint32_t j = 0; j < word_bytes[i].size() - 1; j++) {
                 std::pair<uint32_t, uint32_t> pair = {word_bytes[i][j], word_bytes[i][j+1]};
-                freq[pair] += 1; //C++中，我们不需要检查pair是否在freq中，直接加就行
+                freq[pair] += word_freq[i]; //C++中，我们不需要检查pair是否在freq中，直接加就行
             }
         }
     }

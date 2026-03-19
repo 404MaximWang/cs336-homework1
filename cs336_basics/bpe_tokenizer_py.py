@@ -1,3 +1,5 @@
+# 版本 0：纯 Python 实现
+# 特点：遵循文档原始算法逻辑，未做任何底层优化。
 import regex as re
 import json
 
