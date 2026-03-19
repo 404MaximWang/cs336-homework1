@@ -1,6 +1,6 @@
 # 优化点：新增了multiprocessing处理预分词；修复了C++部分内存占用过大的问题
 from __future__ import annotations
-from pretokenization import find_chunk_boundaries
+from .pretokenization import find_chunk_boundaries
 import regex as re
 import json
 import cppyy
