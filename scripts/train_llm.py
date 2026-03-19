@@ -64,7 +64,14 @@ def init_weights(config: dict) -> dict[str, Tensor]:
 def generate_shit(batch_size: int, context_length: int, vocab_size: int) -> Int[Tensor, "batch_size context_length"]:
     return torch.randint(0, vocab_size, (batch_size, context_length)).cuda()
 
-def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str):
+def load_checkpoint(path: str) -> tuple[dict[str, Tensor], dict]:
+    print(f"Loading checkpoint from {path}...")
+    checkpoint = torch.load(path, map_location="cpu")
+    # 把权重搬到 GPU 并开启梯度
+    weights = {k: v.cuda().requires_grad_(True) for k, v in checkpoint['weights'].items()}
+    return weights, checkpoint['config']
+
+def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str, save_path: str, checkpoint_path: str = None):
     print(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = Tokenizer.load(tokenizer_path)
     
@@ -75,8 +82,12 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str):
     dataset = np.array(ids, dtype=np.int32)
     print(f"Dataset ready! Total tokens: {len(dataset)}")
 
-    config = MODEL_CONFIGS
-    weights = init_weights(config)
+    # 查已有文件 已加入文件大小检查
+    if checkpoint_path and os.path.exists(checkpoint_path) and os.path.getsize(checkpoint_path) > 0:
+        weights, config = load_checkpoint(checkpoint_path)
+    else:
+        config = MODEL_CONFIGS
+        weights = init_weights(config)
     optimizer = AdamW(params = weights.values(), lr = 1e-4, betas = (0.9, 0.999), eps = 1e-8, weight_decay = 0.1)
     for step in range(num_steps):
         # 喂饭
@@ -89,15 +100,31 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str):
         loss.backward()
         optimizer.step()
         if step % 10 == 0:
-            print(f"Step {step}: Loss = {loss.item():.4f}")
+            print(f"Step {step}: Loss = {loss.item():.4f}")        
+        # 每100步存档一次
+        if step > 0 and step % 100 == 0:
+            ckpt_name = f"checkpoint_step_{step}.pt"
+            torch.save({'weights': weights, 'config': config}, ckpt_name)
+            print(f"Periodic checkpoint saved: {ckpt_name}")
+    # 保存
+    print(f"Training finished! Saving weights to {save_path}...")
+    torch.save({'weights': weights, 'config': config}, save_path)
+    print("All saved! Mission Accomplished.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--input", type=str, required=True, help="Path to text corpus")
     parser.add_argument("--tokenizer", type=str, default="tokenizer.json")
+    parser.add_argument("--output", type=str, default="model_weights.pt", help="Where to save the final weights")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint for resuming")
     args = parser.parse_args()
-    train_llm(num_steps=args.steps, corpus_path=args.input, tokenizer_path=args.tokenizer)
+    
+    train_llm(num_steps=args.steps, 
+              corpus_path=args.input, 
+              tokenizer_path=args.tokenizer,
+              save_path=args.output,
+              checkpoint_path=args.checkpoint)
 
 
 
