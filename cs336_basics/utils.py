@@ -25,7 +25,7 @@ def cross_entropy(
     # 疑似出了一点问题 重新写过 我们需要防止一个情况：exp(-1000) = 0，然后log(0) = -inf。
     x_optimized = inputs - torch.max(inputs, dim = -1, keepdim = True).values
     log_softmax = x_optimized - torch.logsumexp(x_optimized, dim = -1, keepdim = True)
-    return -log_softmax[torch.arange(inputs.shape[0]), targets].mean()
+    return -log_softmax[torch.arange(inputs.shape[0], device=inputs.device), targets].mean()
 
 def embedding(
     weights: Float[Tensor, " vocab_size d_model"],

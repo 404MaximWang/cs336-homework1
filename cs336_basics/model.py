@@ -29,7 +29,8 @@ def multihead_self_attention(
     v = v.transpose(-3, -2) # ... num_heads sequence_length head_dim_v
     # 转置以后 倒数第三维是num_heads 倒数第二维是sequence_length
     # 生成一个下三角矩阵
-    mask = torch.tril(torch.ones(sequence_length, sequence_length)) # sequence_length sequence_length
+    mask = torch.tril(torch.ones(sequence_length, sequence_length, device=q.device)) # sequence_length sequence_length
+
     # 神人scaled_dot_product_attention
     res: Float[Tensor, " ... num_heads sequence_length head_dim_v"] = scaled_dot_product_attention(q, k, v, mask)
     # 合并多个头 也就是把num_heads和head_dim_v合并，变成d_v
@@ -99,11 +100,11 @@ def transformer_block(
     eps: float = 1e-5
     res: Float[Tensor, " batch sequence_length d_model"] = rmsnorm(eps, weights["ln1.weight"], in_features)
     res = multihead_self_attention_with_rope(d_model, num_heads, max_seq_len, theta, weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"], weights["attn.output_proj.weight"], res)
-    res += in_features
+    res = res + in_features
     # FFN就是Feed-Forward Network，前馈网络
     res2: Float[Tensor, " batch sequence_length d_model"] = rmsnorm(eps, weights["ln2.weight"], res)
     res2 = swiglu(weights["ffn.w1.weight"], weights["ffn.w2.weight"], weights["ffn.w3.weight"], res2)
-    res += res2
+    res = res + res2
     return res
 
 def transformer_lm(
