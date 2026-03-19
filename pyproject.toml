@@ -5,34 +5,35 @@ description = "CS336 Assignment 1"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "einops>=0.8.1", # tensor operations
-    "einx>=0.3.0", # more general tensor operations
-    "jaxtyping>=0.3.0", # type hints for pytorch/jax/numpy
+    "einops>=0.8.1",
+    "einx>=0.3.0",
+    "jaxtyping>=0.3.0",
     "numpy",
     "psutil>=6.1.1",
     "pytest>=8.3.4",
-    "regex>=2024.11.6", # more powerful regex than the builtin `re` module
-    "submitit>=1.5.2", # job submission for SLURM
+    "regex>=2024.11.6",
+    "submitit>=1.5.2",
     "tiktoken>=0.9.0",
-    "torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
+    "torch>=2.4.0",
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "ty>=0.0.1a16",
-    "cppyy>=3.5.0",
 ]
 
-[build-system]
-requires = ["uv_build>=0.8.3,<0.9.0"]
-build-backend = "uv_build"
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
-[tool.uv.build-backend]
-module-name = "cs336_basics"
-module-root = ""
+[tool.uv.sources]
+torch = { index = "pytorch-cuda" }
+torchvision = { index = "pytorch-cuda" }
+torchaudio = { index = "pytorch-cuda" }
 
 [tool.uv]
 package = true
 python-preference = "managed"
+prerelease = "allow" # 允许安装 2.10.0 这种抢跑版本
 
 [tool.pytest.ini_options]
 log_cli = true

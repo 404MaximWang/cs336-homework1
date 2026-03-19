@@ -87,10 +87,19 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str, save_path: 
     print(f"Loading tokenizer from {tokenizer_path}...")
     tokenizer = Tokenizer.load(tokenizer_path)
     
-    print(f"Encoding corpus from {corpus_path} (this might take a while)...")
-    ids = parallel_encode(tokenizer, corpus_path, tokenizer_path)
-    dataset = np.array(ids, dtype=np.int32)
-    print(f"Dataset ready! Total tokens: {len(dataset)}")
+    # encoding结果缓存
+    dataset_cache_path = corpus_path + ".npy"
+    if os.path.exists(dataset_cache_path):
+        print(f"Found cached dataset at {dataset_cache_path}, loading instantly...")
+        dataset = np.load(dataset_cache_path)
+    else:
+        print(f"Encoding corpus from {corpus_path} (this might take a while)...")
+        # 将生成的的列表用np.array转成int32并保存
+        ids = parallel_encode(tokenizer, corpus_path, tokenizer_path)
+        dataset = np.array(ids, dtype=np.int32)
+        print(f"Dataset ready! Total tokens: {len(dataset)}")
+        print(f"Saving dataset cache to {dataset_cache_path}...")
+        np.save(dataset_cache_path, dataset)
 
     # 查已有文件 已加入文件大小检查
     if checkpoint_path and os.path.exists(checkpoint_path) and os.path.getsize(checkpoint_path) > 0:
