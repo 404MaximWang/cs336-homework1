@@ -1,7 +1,7 @@
 from dataclasses import dataclass, asdict
 from cs336_basics.utils import cross_entropy, get_batch
 from cs336_basics.model import transformer_lm
-from cs336_basics.optimizer import AdamW
+from cs336_basics.optimizer import AdamW, get_lr_cosine_schedule, gradient_clipping
 from cs336_basics.bpe_tokenizer_optimized_3 import Tokenizer
 from cs336_basics.pretokenization import find_chunk_boundaries
 import torch
@@ -109,6 +109,10 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str, save_path: 
         weights = init_weights(config)
     optimizer = AdamW(params = weights.values(), lr = 1e-4, betas = (0.9, 0.999), eps = 1e-8, weight_decay = 0.1)
     for step in range(num_steps):
+        # 调整学习率
+        current_lr = get_lr_cosine_schedule(step, warmup_steps=100, min_lr=1e-5, max_lr=1e-3, ending_decay_step=num_steps)
+        for group in optimizer.param_groups:
+            group['lr'] = current_lr     
         # 喂饭
         input, target = get_batch(dataset, batch_size = 32, context_length = config["context_length"], device = "cuda")
         # 显式转换为long
@@ -117,9 +121,11 @@ def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str, save_path: 
         loss: Float[Tensor, ""] = cross_entropy(logits.view(-1, config["vocab_size"]), target.view(-1))
         optimizer.zero_grad()
         loss.backward()
+        # 梯度裁剪防爆炸
+        gradient_clipping(params=list(weights.values()), max_norm=1.0)
         optimizer.step()
         if step % 10 == 0:
-            print(f"Step {step}: Loss = {loss.item():.4f}")        
+            print(f"Step {step}: Loss = {loss.item():.4f} | LR = {current_lr:.6f}")
         # 每100步存档一次
         if step > 0 and step % 100 == 0:
             ckpt_name = f"checkpoint_step_{step}.pt"
