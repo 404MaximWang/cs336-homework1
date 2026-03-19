@@ -1,0 +1,106 @@
+from dataclasses import dataclass, asdict
+from cs336_basics.utils import cross_entropy, get_batch
+from cs336_basics.model import transformer_lm
+from cs336_basics.optimizer import AdamW
+from cs336_basics.bpe_tokenizer_optimized_3 import Tokenizer
+import torch
+import numpy as np
+import os
+import argparse
+from torch import Tensor
+from jaxtyping import Float, Int
+
+MODEL_CONFIGS = {
+    "vocab_size": 10000,
+    "context_length": 256,
+    "d_model": 512,
+    "d_ff": 1344,
+    "num_layers": 4,
+    "num_heads": 16,
+    "rope_theta": 10000.0
+}
+
+def init_weights(config: dict) -> dict[str, Tensor]:
+    d_model = config["d_model"]
+    d_ff = config["d_ff"]
+    vocab_size = config["vocab_size"]
+    num_layers = config["num_layers"]
+    
+    # 线性
+    def w_init(rows, cols):
+        return (torch.randn(rows, cols) * 0.02).cuda().requires_grad_(True)
+    
+    # 归一化
+    def ln_init(size):
+        return torch.ones(size).cuda().requires_grad_(True)
+    weights = {}
+    
+    # Embeddings & LM Head
+    weights["token_embeddings.weight"] = w_init(vocab_size, d_model)
+    weights["lm_head.weight"] = w_init(vocab_size, d_model)
+    
+    # Transformer Layers
+    for i in range(num_layers):
+        # Attention
+        weights[f"layers.{i}.attn.q_proj.weight"] = w_init(d_model, d_model)
+        weights[f"layers.{i}.attn.k_proj.weight"] = w_init(d_model, d_model)
+        weights[f"layers.{i}.attn.v_proj.weight"] = w_init(d_model, d_model)
+        weights[f"layers.{i}.attn.output_proj.weight"] = w_init(d_model, d_model)
+        
+        # FFN
+        weights[f"layers.{i}.ffn.w1.weight"] = w_init(d_ff, d_model)
+        weights[f"layers.{i}.ffn.w2.weight"] = w_init(d_model, d_ff)
+        weights[f"layers.{i}.ffn.w3.weight"] = w_init(d_ff, d_model)
+        
+        # RMSNorms
+        weights[f"layers.{i}.ln1.weight"] = ln_init(d_model)
+        weights[f"layers.{i}.ln2.weight"] = ln_init(d_model)
+    
+    # Final Norm
+    weights["ln_final.weight"] = ln_init(d_model)
+    
+    return weights
+
+def generate_shit(batch_size: int, context_length: int, vocab_size: int) -> Int[Tensor, "batch_size context_length"]:
+    return torch.randint(0, vocab_size, (batch_size, context_length)).cuda()
+
+def train_llm(num_steps: int, corpus_path: str, tokenizer_path: str):
+    print(f"Loading tokenizer from {tokenizer_path}...")
+    tokenizer = Tokenizer.load(tokenizer_path)
+    
+    print(f"Encoding corpus from {corpus_path} (this might take a while)...")
+    with open(corpus_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    ids = tokenizer.encode(text)
+    dataset = np.array(ids, dtype=np.int32)
+    print(f"Dataset ready! Total tokens: {len(dataset)}")
+
+    config = MODEL_CONFIGS
+    weights = init_weights(config)
+    optimizer = AdamW(params = weights.values(), lr = 1e-4, betas = (0.9, 0.999), eps = 1e-8, weight_decay = 0.1)
+    for step in range(num_steps):
+        # 喂饭
+        input, target = get_batch(dataset, batch_size = 32, context_length = config["context_length"], device = "cuda")
+        # 显式转换为long
+        input, target = input.long(), target.long()        
+        logits: Float[Tensor, "batch_size context_length vocab_score"] = transformer_lm(weights = weights, in_indices = input, **config)    
+        loss: Float[Tensor, ""] = cross_entropy(logits.view(-1, config["vocab_size"]), target.view(-1))
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if step % 10 == 0:
+            print(f"Step {step}: Loss = {loss.item():.4f}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--input", type=str, required=True, help="Path to text corpus")
+    parser.add_argument("--tokenizer", type=str, default="tokenizer.json")
+    args = parser.parse_args()
+    train_llm(num_steps=args.steps, corpus_path=args.input, tokenizer_path=args.tokenizer)
+
+
+
+    
+
+    

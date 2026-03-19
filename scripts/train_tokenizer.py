@@ -12,7 +12,7 @@ def main():
     parser.add_argument("--input", type=str, default="data/TinyStoriesV2-GPT4-valid.txt", 
                         help="Path to training text (default: validation set for debug)")
     parser.add_argument("--vocab_size", type=int, default=10000)
-    parser.add_argument("--save_path", type=str, default="data/tokenizer.json")
+    parser.add_argument("--save_path", type=str, default="tokenizer.json")
     parser.add_argument("--max_bytes", type=int, default=None, help="Limit input size")
     args = parser.parse_args()
 
