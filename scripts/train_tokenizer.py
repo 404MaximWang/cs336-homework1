@@ -5,7 +5,7 @@ import argparse
 # Add the project root to sys.path
 sys.path.append(os.getcwd())
 
-from cs336_basics.bpe_tokenizer_optimized_2 import Tokenizer
+from cs336_basics.bpe_tokenizer_optimized_3 import Tokenizer
 
 def main():
     parser = argparse.ArgumentParser(description="Train BPE tokenizer")
